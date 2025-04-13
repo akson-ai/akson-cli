@@ -9,3 +9,9 @@ dependencies = [
     "httpx>=0.28.1",
     "prompt-toolkit>=3.0.50",
 ]
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
