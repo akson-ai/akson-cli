@@ -67,6 +67,12 @@ async def chat_loop(base_url: str, chat_id: str):
         chat_state = await get_chat_state(client, chat_id)
         assistant = chat_state["assistant"]
 
+        # Print previous messages if they exist
+        if "messages" in chat_state:
+            for message in chat_state["messages"]:
+                role = "Assistant" if message["role"] == "assistant" else "You"
+                print(f"{role}: {message['content']}\n")
+
         # Start event streaming in background
         event_task = asyncio.create_task(stream_events(client, chat_id))
 
