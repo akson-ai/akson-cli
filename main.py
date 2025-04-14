@@ -40,7 +40,7 @@ async def send_message(client: httpx.AsyncClient, chat_id: str, content: str, as
 
 
 async def stream_events(client: httpx.AsyncClient, chat_id: str):
-    async with client.stream("GET", f"/{chat_id}/events") as response:
+    async with client.stream("GET", f"/{chat_id}/events", timeout=None) as response:
         async for line in response.aiter_lines():
             if line.startswith("data: "):
                 data = json.loads(line[6:])
@@ -74,6 +74,9 @@ async def chat_loop(client: httpx.AsyncClient, chat_id: str, assistant: str):
                         await set_assistant(client, chat_id, args[0])
                         assistant = args[0]
                     print(f"Selected assistant: {assistant}\n")
+                else:
+                    print("Unknown command\n")
+
                 continue
 
             await send_message(client, chat_id, user_input, assistant)
@@ -100,11 +103,23 @@ async def main_async(base_url: str, chat_id: str):
                 role = "Assistant" if message["role"] == "assistant" else "You"
                 print(f"{role}: {message['content']}\n")
 
+        # Patching stdout to make sure that the text appears above the prompt,
+        # and that it doesn't destroy the output from the renderer.
         with patch_stdout():
-            await asyncio.gather(
-                chat_loop(client, chat_id, assistant),
-                stream_events(client, chat_id),
-            )
+            # Create tasks for both coroutines
+            chat_task = asyncio.create_task(chat_loop(client, chat_id, assistant))
+            stream_task = asyncio.create_task(stream_events(client, chat_id))
+
+            # Wait for chat loop to complete
+            try:
+                await chat_task
+            finally:
+                # Cancel the stream task when chat loop ends
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except asyncio.CancelledError:
+                    pass
     finally:
         await client.aclose()
 
