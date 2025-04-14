@@ -90,36 +90,44 @@ async def chat_loop(client: httpx.AsyncClient, chat_id: str, assistant: str):
             continue
 
 
-async def main_async(base_url: str, chat_id: str):
+async def chat(chat_id: str, client: httpx.AsyncClient):
+    # Get chat state
+    chat_state = await get_chat_state(client, chat_id)
+    assistant = chat_state["assistant"]
+
+    # Print previous messages if they exist
+    if "messages" in chat_state:
+        for message in chat_state["messages"]:
+            role = "Assistant" if message["role"] == "assistant" else "You"
+            print(f"{role}: {message['content']}\n")
+
+    # Patching stdout to make sure that the text appears above the prompt,
+    # and that it doesn't destroy the output from the renderer.
+    with patch_stdout():
+        # Create tasks for both coroutines
+        chat_task = asyncio.create_task(chat_loop(client, chat_id, assistant))
+        stream_task = asyncio.create_task(stream_events(client, chat_id))
+
+        # Wait for chat loop to complete
+        try:
+            await chat_task
+        finally:
+            # Cancel the stream task when chat loop ends
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def main_async(chat_id: str | None, base_url: str):
+    if not chat_id:
+        chat_id = str(uuid.uuid4())
+        print(f"Using new chat ID: {chat_id}\n")
+
     client = httpx.AsyncClient(base_url=base_url)
     try:
-        # Get chat state
-        chat_state = await get_chat_state(client, chat_id)
-        assistant = chat_state["assistant"]
-
-        # Print previous messages if they exist
-        if "messages" in chat_state:
-            for message in chat_state["messages"]:
-                role = "Assistant" if message["role"] == "assistant" else "You"
-                print(f"{role}: {message['content']}\n")
-
-        # Patching stdout to make sure that the text appears above the prompt,
-        # and that it doesn't destroy the output from the renderer.
-        with patch_stdout():
-            # Create tasks for both coroutines
-            chat_task = asyncio.create_task(chat_loop(client, chat_id, assistant))
-            stream_task = asyncio.create_task(stream_events(client, chat_id))
-
-            # Wait for chat loop to complete
-            try:
-                await chat_task
-            finally:
-                # Cancel the stream task when chat loop ends
-                stream_task.cancel()
-                try:
-                    await stream_task
-                except asyncio.CancelledError:
-                    pass
+        await chat(chat_id, client)
     finally:
         await client.aclose()
 
@@ -132,11 +140,7 @@ def main(chat_id: str | None, base_url: str):
 
     CHAT_ID: Optional chat ID to connect to an existing chat. If not provided, a new UUID will be generated.
     """
-    if not chat_id:
-        chat_id = str(uuid.uuid4())
-        print(f"Using new chat ID: {chat_id}\n")
-
-    asyncio.run(main_async(base_url, chat_id))
+    asyncio.run(main_async(chat_id, base_url))
 
 
 if __name__ == "__main__":
