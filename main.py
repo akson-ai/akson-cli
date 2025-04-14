@@ -7,17 +7,16 @@ import click
 import httpx
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 
 
 async def get_assistants(client: httpx.AsyncClient) -> list[str]:
-    """Get list of available assistants"""
     response = await client.get(f"/assistants")
     response.raise_for_status()
     return [assistant["name"] for assistant in response.json()]
 
 
 async def set_assistant(client: httpx.AsyncClient, chat_id: str, assistant: str) -> None:
-    """Set the assistant for a chat"""
     response = await client.put(
         f"/{chat_id}/assistant",
         headers={"Content-Type": "text/plain"},
@@ -27,14 +26,12 @@ async def set_assistant(client: httpx.AsyncClient, chat_id: str, assistant: str)
 
 
 async def get_chat_state(client: httpx.AsyncClient, chat_id: str) -> dict:
-    """Get the current state of a chat"""
     response = await client.get(f"/{chat_id}/state")
     response.raise_for_status()
     return response.json()
 
 
 async def send_message(client: httpx.AsyncClient, chat_id: str, content: str, assistant: str) -> None:
-    """Send a message to the chat"""
     response = await client.post(
         f"/{chat_id}/message",
         json={"content": content, "assistant": assistant, "id": str(uuid.uuid4())},
@@ -43,7 +40,6 @@ async def send_message(client: httpx.AsyncClient, chat_id: str, content: str, as
 
 
 async def stream_events(client: httpx.AsyncClient, chat_id: str):
-    """Stream events from the chat"""
     async with client.stream("GET", f"/{chat_id}/events") as response:
         async for line in response.aiter_lines():
             if line.startswith("data: "):
@@ -57,12 +53,43 @@ async def stream_events(client: httpx.AsyncClient, chat_id: str):
                         print("\n")
 
 
-async def chat_loop(base_url: str, chat_id: str):
-    """Main chat loop"""
+async def chat_loop(client: httpx.AsyncClient, chat_id: str, assistant: str):
+    session = PromptSession(history=FileHistory(Path.home() / ".akson_chat_history.txt"))
+    while True:
+        try:
+            user_input = await session.prompt_async("You: ")
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            # Handle slash commands
+            if user_input.startswith("/"):
+                command, *args = user_input.split(" ")
+                if command == "/assistants":
+                    assistants = await get_assistants(client)
+                    print(f"Available assistants: {', '.join(assistants)}\n")
+                elif command == "/assistant":
+                    if args:
+                        await set_assistant(client, chat_id, args[0])
+                        assistant = args[0]
+                    print(f"Selected assistant: {assistant}\n")
+                continue
+
+            await send_message(client, chat_id, user_input, assistant)
+
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"Error: {type(e).__name__}: {e}")
+            continue
+
+
+async def main_async(base_url: str, chat_id: str):
     client = httpx.AsyncClient(base_url=base_url)
     try:
-        session = PromptSession(history=FileHistory(Path.home() / ".akson_chat_history.txt"))
-
         # Get chat state
         chat_state = await get_chat_state(client, chat_id)
         assistant = chat_state["assistant"]
@@ -73,61 +100,28 @@ async def chat_loop(base_url: str, chat_id: str):
                 role = "Assistant" if message["role"] == "assistant" else "You"
                 print(f"{role}: {message['content']}\n")
 
-        # Start event streaming in background
-        event_task = asyncio.create_task(stream_events(client, chat_id))
-
-        try:
-            while True:
-                try:
-                    user_input = await session.prompt_async("You: ")
-
-                    user_input = user_input.strip()
-                    if not user_input:
-                        continue
-
-                    # Handle slash commands
-                    if user_input.startswith("/"):
-                        command, *args = user_input.split(" ")
-                        if command == "/assistants":
-                            assistants = await get_assistants(client)
-                            print(f"Available assistants: {', '.join(assistants)}")
-                            continue
-                        if command == "/assistant":
-                            if args:
-                                await set_assistant(client, chat_id, args[0])
-                                assistant = args[0]
-                            else:
-                                print(f"Selected assistant: {assistant}")
-                            continue
-
-                    await send_message(client, chat_id, user_input, assistant)
-
-                except KeyboardInterrupt:
-                    continue
-                except EOFError:
-                    break
-                except Exception as e:
-                    print(f"Error: {type(e).__name__}: {e}")
-                    continue
-        finally:
-            event_task.cancel()
+        with patch_stdout():
+            await asyncio.gather(
+                chat_loop(client, chat_id, assistant),
+                stream_events(client, chat_id),
+            )
     finally:
         await client.aclose()
 
 
 @click.command()
 @click.argument("chat_id", required=False)
-@click.option("--endpoint", default="http://localhost:8000", help="Backend server endpoint")
-def main(chat_id: str | None, endpoint: str):
+@click.option("--base_url", default="http://localhost:8000", help="Backend server base URL")
+def main(chat_id: str | None, base_url: str):
     """Start the chat CLI
 
     CHAT_ID: Optional chat ID to connect to an existing chat. If not provided, a new UUID will be generated.
     """
-    if chat_id is None:
+    if not chat_id:
         chat_id = str(uuid.uuid4())
         print(f"Using new chat ID: {chat_id}\n")
 
-    asyncio.run(chat_loop(endpoint, chat_id))
+    asyncio.run(main_async(base_url, chat_id))
 
 
 if __name__ == "__main__":
